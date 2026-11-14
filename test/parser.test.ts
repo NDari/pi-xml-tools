@@ -41,6 +41,7 @@ function run(text: string, seed: number): { text: string; calls: { name: string;
 		}
 		if (e.type === "halt") halted = true;
 		if (e.type === "text") assert.ok(!e.text.includes("<tool_call ") && !e.text.includes("<tool_call>"), "no tags leak into text");
+		if (e.type === "text") assert.ok(!/```tool_call[\s>]/.test(e.text), "no tool_call fence leaks into text");
 	}
 	return { text: out, calls, halted, order };
 }
@@ -107,4 +108,74 @@ test("name given in body instead of attribute", () => {
 test("trailing '<tool_call' prefix at end of stream becomes text", () => {
 	const r = run("see <tool_ca", 3);
 	assert.equal(r.text, "see <tool_ca");
+});
+
+// Fenced forms below are verbatim Gemma 3 (12B and 27B) output seen with llama.cpp.
+
+test("fenced call with attributes on the fence line", () => {
+	const t = '```tool_call name="edit">\n<parameter name="path">app.ts</parameter>\n<parameter name="edits">\n<item>\n<oldText>hello</oldText>\n<newText>hi</newText>\n</item>\n</parameter>\n</tool_call>\n```';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, "");
+		assert.equal(r.calls.length, 1);
+		assert.equal(r.calls[0].name, "edit");
+		assert.equal(r.calls[0].complete, true);
+		assert.ok(r.calls[0].body.startsWith('\n<parameter name="path">'));
+	}
+});
+
+test("fenced call with an inner <tool name> wrapper", () => {
+	const t = '```tool_call\n<tool name="edit">\n<parameter name="path">app.ts</parameter>\n</tool>\n```';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, "");
+		assert.deepEqual(r.calls, [{ name: "", body: '<tool name="edit">\n<parameter name="path">app.ts</parameter>\n', complete: true }]);
+	}
+});
+
+test("fenced call with an inner <tool_call> tag", () => {
+	const t = '```tool_call\n<tool_call name="read">\n<parameter name="path">a.ts</parameter>\n</tool_call>\n```';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, "");
+		assert.equal(r.calls.length, 1);
+		assert.ok(r.calls[0].body.includes('<tool_call name="read">'));
+	}
+});
+
+test("fenced JSON call ends at the closing fence", () => {
+	const t = '```tool_call\n{"name": "bash", "arguments": {"command": "ls"}}\n```\nafter';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, "\nafter");
+		assert.deepEqual(r.calls, [{ name: "", body: '{"name": "bash", "arguments": {"command": "ls"}}', complete: true }]);
+	}
+});
+
+test("text around a fenced call keeps its own content", () => {
+	const t = 'Sure.\n```tool_call name="read">\n<parameter name="path">a</parameter>\n</tool_call>\n```\nDone.';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, "Sure.\n\nDone.");
+		assert.deepEqual(r.order, ["text", "tool", "text"]);
+	}
+});
+
+test("triple backticks inside a fenced XML value don't end the call", () => {
+	const t = '```tool_call name="write">\n<parameter name="content">\n```js\nx()\n```\n</parameter>\n</tool_call>\n```';
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.calls.length, 1);
+		assert.ok(r.calls[0].body.includes("```js\nx()\n```"));
+		assert.equal(r.text, "");
+	}
+});
+
+test("ordinary code fences pass through as text", () => {
+	const t = "Example:\n```ts\nconst x = 1;\n```\nand ```tool_calls``` too.";
+	for (const seed of SEEDS) {
+		const r = run(t, seed);
+		assert.equal(r.text, t);
+		assert.equal(r.calls.length, 0);
+	}
 });

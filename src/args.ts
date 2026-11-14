@@ -16,6 +16,16 @@
 type Schema = Record<string, any>;
 export type JsonObject = Record<string, unknown>;
 
+export interface ParseOptions {
+	/**
+	 * Decode the XML entities &lt; &gt; &amp; &quot; &apos; in string values.
+	 * For models that XML-escape values despite being told not to. Off by
+	 * default, because it changes values that really contain "&amp;" (HTML, for one).
+	 * Values wrapped in CDATA are never decoded.
+	 */
+	decodeEntities?: boolean;
+}
+
 export interface ParsedArguments {
 	args: JsonObject;
 	/** Set when the body could not be converted cleanly. */
@@ -25,15 +35,25 @@ export interface ParsedArguments {
 const PARAM_OPEN = /<parameter\s+name\s*=\s*["']([^"']+)["']\s*>/g;
 const CDATA = /^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/;
 
+/** An inner <tool name="x"> or <tool_call name="x"> wrapper, as written inside a ```tool_call fence. */
+const INNER_OPEN = /^\s*<tool(?:_call)?\s[^>]*>/;
+const INNER_CLOSE = /<\/tool(?:_call)?>\s*$/;
+
 /** Parse a tool call body against the tool's parameter schema. */
-export function parseArguments(body: string, schema: Schema | undefined, partial = false): ParsedArguments {
+export function parseArguments(
+	body: string,
+	schema: Schema | undefined,
+	partial = false,
+	opts: ParseOptions = {},
+): ParsedArguments {
+	if (INNER_OPEN.test(body)) body = body.replace(INNER_OPEN, "").replace(INNER_CLOSE, "");
 	const params = extractParameterTags(body, partial);
-	if (params.length > 0) return convertProperties(params, schema);
+	if (params.length > 0) return convertProperties(params, schema, opts);
 
 	const props = Object.keys(schema?.properties ?? {});
 	if (props.length > 0) {
 		const children = extractChildTags(body, props, partial);
-		if (children.length > 0) return convertProperties(children, schema);
+		if (children.length > 0) return convertProperties(children, schema, opts);
 	}
 
 	const trimmed = body.trim();
@@ -64,6 +84,8 @@ export function parseArguments(body: string, schema: Schema | undefined, partial
 
 /** Find a tool name in the body when the opening tag had no name attribute. */
 export function findNameInBody(body: string): string | undefined {
+	const wrapper = /^\s*<tool(?:_call)?\s[^>]*?\bname\s*=\s*["']?([\w.:-]+)/.exec(body);
+	if (wrapper) return wrapper[1];
 	const tag = /<(?:name|tool_name|tool|function)>\s*([\w.:-]+)\s*<\//.exec(body);
 	if (tag) return tag[1];
 	const fn = /<function\s*=\s*["']?([\w.:-]+)/.exec(body);
@@ -190,12 +212,12 @@ function extractItems(raw: string): string[] | undefined {
 // Value conversion
 // ---------------------------------------------------------------------------
 
-function convertProperties(props: RawProperty[], schema: Schema | undefined): ParsedArguments {
+function convertProperties(props: RawProperty[], schema: Schema | undefined, opts: ParseOptions): ParsedArguments {
 	const args: JsonObject = {};
 	const errors: string[] = [];
 	const properties: Record<string, Schema> = schema?.properties ?? {};
 	for (const { name, raw } of props) {
-		const { value, error } = convertValue(raw, properties[name]);
+		const { value, error } = convertValue(raw, properties[name], opts);
 		if (error) errors.push(`${name}: ${error}`);
 		if (name in args) {
 			// Repeated parameter: collect into an array.
@@ -245,9 +267,10 @@ function pickVariant(schema: Schema | undefined, type: string): Schema | undefin
 	return schema;
 }
 
-export function convertValue(rawValue: string, schema: Schema | undefined): Converted {
+export function convertValue(rawValue: string, schema: Schema | undefined, opts: ParseOptions = {}): Converted {
 	const cdata = CDATA.exec(rawValue);
 	const raw = cdata ? cdata[1] : rawValue;
+	const text = () => (opts.decodeEntities && !cdata ? decodeEntities(trimBlock(raw)) : trimBlock(raw));
 	const types = schemaTypes(schema);
 	const trimmed = raw.trim();
 
@@ -259,7 +282,7 @@ export function convertValue(rawValue: string, schema: Schema | undefined): Conv
 			const values: unknown[] = [];
 			const errors: string[] = [];
 			items.forEach((item, i) => {
-				const r = convertValue(item, itemSchema);
+				const r = convertValue(item, itemSchema, opts);
 				values.push(r.value);
 				if (r.error) errors.push(`item ${i + 1}: ${r.error}`);
 			});
@@ -281,17 +304,17 @@ export function convertValue(rawValue: string, schema: Schema | undefined): Conv
 		const names = Object.keys(objSchema?.properties ?? {});
 		const children = extractChildTags(raw, names, false);
 		if (children.length > 0) {
-			const r = convertProperties(children, objSchema);
+			const r = convertProperties(children, objSchema, opts);
 			return { value: r.args, error: r.error };
 		}
 		// Allow <parameter name=".."> inside an object, too.
 		const params = extractParameterTags(raw, false);
 		if (params.length > 0) {
-			const r = convertProperties(params, objSchema);
+			const r = convertProperties(params, objSchema, opts);
 			return { value: r.args, error: r.error };
 		}
 	}
-	if (types.includes("string")) return { value: trimBlock(raw) };
+	if (types.includes("string")) return { value: text() };
 	if (types.includes("integer") || types.includes("number")) {
 		const n = Number(trimmed);
 		if (trimmed !== "" && Number.isFinite(n)) return { value: n };
@@ -308,12 +331,19 @@ export function convertValue(rawValue: string, schema: Schema | undefined): Conv
 			const parsed = tryJson(trimmed);
 			if (parsed.ok) return { value: parsed.value };
 		}
-		return { value: trimBlock(raw) };
+		return { value: text() };
 	}
 	// Type mismatch: hand the raw text through and let Pi's validation report it to the model.
 	const parsed = tryJson(trimmed);
 	if (parsed.ok) return { value: parsed.value };
-	return { value: trimBlock(raw) };
+	return { value: text() };
+}
+
+const ENTITIES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+
+/** Single pass, so "&amp;lt;" becomes "&lt;", not "<". */
+function decodeEntities(s: string): string {
+	return s.replace(/&(lt|gt|amp|quot|apos);/g, (_, name: string) => ENTITIES[name]);
 }
 
 function tryJson(text: string): { ok: true; value: unknown } | { ok: false; error: string } {

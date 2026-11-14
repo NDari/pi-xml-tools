@@ -78,6 +78,7 @@ You can also set `"api": "openai-xml-tools"` on individual models instead of on 
 |---|---|---|
 | `PI_XML_TOOLS_STOP` | on | Sends `stop: ["<tool_result"]` with each request so the server stops the model before it writes a made-up tool result. Set to `0` if your gateway rejects the `stop` field. The extension also cuts the response off on its side, so it still works without this. |
 | `PI_XML_TOOLS_EXTRA_STOP` | none | Extra stop sequences to send, separated by `\|`. |
+| `PI_XML_TOOLS_DECODE_ENTITIES` | off | Set to `1` to decode `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). Off by default because it also changes values that really contain those entities, such as HTML. Values in `<![CDATA[...]]>` are never decoded. |
 | `PI_XML_TOOLS_PROVIDERS` | none | Comma-separated provider names to attach to, in addition to those found in models.json. |
 
 ## How it works
@@ -87,7 +88,7 @@ You can also set `"api": "openai-xml-tools"` on individual models instead of on 
 3. **Made-up results.** If the model starts writing `<tool_result` itself, the extension stops the request and discards the rest of the text.
 4. **Malformed calls.** If a call can't be parsed, Pi sends an error result back to the model that shows what it wrote and what was wrong, so the model can try again.
 
-The parser also accepts a few formats models tend to fall back to: `<path>...</path>` child tags, a JSON object body, `{"name": ..., "arguments": {...}}`, and `<![CDATA[...]]>` values.
+The parser also accepts a few formats models tend to fall back to: `<path>...</path>` child tags, a JSON object body, `{"name": ..., "arguments": {...}}`, and `<![CDATA[...]]>` values. It also accepts a call written as a markdown code block tagged `tool_call` (```` ```tool_call name="edit"> ```` or ```` ```tool_call ```` followed by `<tool name="edit">`), which Gemma 3 does often.
 
 ## Tuning for your model
 

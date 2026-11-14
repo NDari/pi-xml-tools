@@ -31,7 +31,7 @@ You can call tools to act on the user's machine. To call a tool, write a tool ca
 </tool_call>
 
 How to write values:
-- Strings are written raw, exactly as they should be received. Do not quote them, do not JSON-escape them, and do not XML-escape characters such as < > &. Multi-line text and code go directly between the tags.
+- Strings are written raw, exactly as they should be received. Do not quote them, do not JSON-escape them, and do not XML-escape them: write < > & " as they are, never as &lt; &gt; &amp; &quot;. Multi-line text and code go directly between the tags.
 - Numbers and booleans are written plainly, e.g. 42 or true.
 - A list of objects is written with one <item> per element and one tag per field inside it, for example:
 <parameter name="edits">
@@ -46,7 +46,8 @@ How to write values:
 Rules:
 - You may make several tool calls in one reply, one block after another.
 - After your last tool call, stop writing and wait. The results arrive in the next message inside <tool_result> blocks. Never write a <tool_result> block yourself and never guess what a tool returned.
-- Only write a tool_call block when you actually want to call that tool. Do not put tool_call blocks inside code fences, examples or explanations.
+- Write a tool_call block as plain text that starts with <tool_call. Never wrap it in a code fence (\`\`\`).
+- Only write a tool_call block when you actually want to call that tool. Do not put tool_call blocks inside examples or explanations.
 - If no tool is needed, just answer normally.
 
 ## Available tools
@@ -67,11 +68,11 @@ function renderTool(tool: Tool): string {
 	const params = props.length
 		? props.map(([name, p]) => renderParam(name, p, required.has(name))).join("\n")
 		: "(no parameters)";
-	return `<tool name="${tool.name}">
+	// A markdown heading rather than a <tool name="..."> tag: models copied that tag into their calls.
+	return `### ${tool.name}
 ${tool.description.trim()}
 Parameters:
-${params}
-</tool>`;
+${params}`;
 }
 
 function renderParam(name: string, schema: Record<string, any>, required: boolean, indent = "- "): string {

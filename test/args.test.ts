@@ -141,3 +141,41 @@ test("serialize -> parse round trip", () => {
 		assert.deepEqual(r.args, args, xml);
 	}
 });
+
+test("inner <tool name> wrapper from a fenced call is unwrapped", () => {
+	const body = '\n<tool name="edit">\n<parameter name="path">app.ts</parameter>\n<parameter name="edits">\n<item>\n<oldText>hello</oldText>\n<newText>hi <friend></newText>\n</item>\n</parameter>\n';
+	assert.equal(findNameInBody(body), "edit");
+	const r = parseArguments(body, edit);
+	assert.equal(r.error, undefined);
+	assert.deepEqual(r.args, { path: "app.ts", edits: [{ oldText: "hello", newText: "hi <friend>" }] });
+	// With the closing tag still present, too.
+	assert.deepEqual(parseArguments(`${body}</tool>\n`, edit).args, r.args);
+	assert.equal(findNameInBody('\n<tool_call name="read">\n<parameter name="path">a</parameter>'), "read");
+});
+
+test("a parameter literally named tool is not treated as a wrapper", () => {
+	const schema = { type: "object", properties: { tool: { type: "string" } } };
+	assert.deepEqual(parseArguments("<tool>hammer</tool>", schema).args, { tool: "hammer" });
+});
+
+test("entity decoding is off by default and opt-in", () => {
+	const body = `<parameter name="path">a.ts</parameter><parameter name="edits"><item><oldText>&amp;amp;</oldText><newText>hi &lt;friend&gt; &amp; &quot;co&quot; &apos;x&apos;</newText></item></parameter>`;
+	assert.deepEqual(parseArguments(body, edit).args, {
+		path: "a.ts",
+		edits: [{ oldText: "&amp;amp;", newText: "hi &lt;friend&gt; &amp; &quot;co&quot; &apos;x&apos;" }],
+	});
+	assert.deepEqual(parseArguments(body, edit, false, { decodeEntities: true }).args, {
+		path: "a.ts",
+		// Single pass: "&amp;amp;" decodes once, to "&amp;".
+		edits: [{ oldText: "&amp;", newText: `hi <friend> & "co" 'x'` }],
+	});
+	// CDATA is explicitly raw, so it is never decoded.
+	assert.deepEqual(parseArguments(`<parameter name="command"><![CDATA[echo &amp;]]></parameter>`, bash, false, { decodeEntities: true }).args, {
+		command: "echo &amp;",
+	});
+	// Numbers are unaffected.
+	assert.deepEqual(parseArguments(`<parameter name="path">&lt;a&gt;</parameter><parameter name="limit">5</parameter>`, read, false, { decodeEntities: true }).args, {
+		path: "<a>",
+		limit: 5,
+	});
+});

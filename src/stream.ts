@@ -33,6 +33,8 @@ export interface XmlToolsSettings {
 	useStopSequences: boolean;
 	/** Extra stop sequences to send. */
 	extraStop: string[];
+	/** Decode XML entities (&amp; etc.) in string values, for models that escape them. */
+	decodeEntities: boolean;
 }
 
 export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsSettings {
@@ -43,6 +45,7 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsS
 			.split("|")
 			.map((s) => s.trim())
 			.filter(Boolean),
+		decodeEntities: /^(1|true|yes|on)$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? ""),
 	};
 }
 
@@ -151,7 +154,7 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 				const block = output.content[toolIndex] as ToolCall;
 				const finalName = name || findNameInBody(body) || block.name;
 				block.name = finalName;
-				const parsed = parseArguments(body, toolSchema(finalName));
+				const parsed = parseArguments(body, toolSchema(finalName), false, settings);
 				block.arguments = parsed.args as ToolCall["arguments"];
 				const problems: string[] = [];
 				if (!finalName) problems.push('The tool call has no name. Write <tool_call name="TOOL_NAME">.');
@@ -196,7 +199,7 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 							const block = output.content[toolIndex] as ToolCall;
 							if (!block.name) block.name = findNameInBody(ev.body) ?? "";
 							// Best-effort live arguments so Pi can render progress.
-							block.arguments = parseArguments(ev.body, toolSchema(block.name), true).args as ToolCall["arguments"];
+							block.arguments = parseArguments(ev.body, toolSchema(block.name), true, settings).args as ToolCall["arguments"];
 							stream.push({ type: "toolcall_delta", contentIndex: toolIndex, delta: ev.delta, partial: output });
 							break;
 						}
