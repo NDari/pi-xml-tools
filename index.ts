@@ -8,12 +8,28 @@
  * providers at startup and attaches the XML tool-calling stream to them.
  *
  * Providers can also be listed explicitly with PI_XML_TOOLS_PROVIDERS=a,b.
+ *
+ * Options come from settings.json ("xmlTools"), PI_XML_TOOLS_* environment
+ * variables, --xml-tools-* flags and the /xml-tools command; see src/config.ts.
  */
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { createXmlToolsStream, settingsFromEnv } from "./src/stream.ts";
+import { xmlToolsCommand } from "./src/command.ts";
+import {
+	type Layers,
+	OPTIONS,
+	type ParsedConfig,
+	parseConfig,
+	providersFromEnv,
+	resolveSettings,
+	SETTINGS_KEY,
+	type SettingsLayer,
+	settingsFromEnv,
+	settingsFromFlags,
+} from "./src/config.ts";
+import { createXmlToolsStream } from "./src/stream.ts";
 
 export const XML_TOOLS_API = "openai-xml-tools";
 
@@ -38,23 +54,48 @@ function readModelsJson(): unknown {
 }
 
 export default function (pi: ExtensionAPI) {
-	const fromEnv = (process.env.PI_XML_TOOLS_PROVIDERS ?? "")
-		.split(",")
-		.map((s) => s.trim())
-		.filter(Boolean);
-	const providers = [...new Set([...findXmlToolProviders(readModelsJson()), ...fromEnv])];
-	const streamSimple = createXmlToolsStream(settingsFromEnv());
+	for (const o of OPTIONS) {
+		const values = o.choices ? ` (${o.choices.join(", ")})` : "";
+		pi.registerFlag(o.flag, { description: `${o.description}${values}`, type: "string" });
+	}
 
+	// pi.getSettings() returns what Pi loaded at startup, so settings.json edits need a restart
+	// (/xml-tools changes apply at once through the session layer). It can't be called while
+	// extensions load, so these only run later.
+	const readConfig = (): ParsedConfig => {
+		try {
+			return parseConfig((pi.getSettings() as Record<string, unknown>)[SETTINGS_KEY]);
+		} catch (error) {
+			return { settings: {}, warnings: [`could not read settings (${(error as Error).message}).`] };
+		}
+	};
+	const env = settingsFromEnv();
+	const session: SettingsLayer = {};
+	const layers = (): Layers => ({
+		settings: readConfig().settings,
+		env,
+		flags: settingsFromFlags((name) => pi.getFlag(name)).layer,
+		session,
+	});
+
+	const providers = [...new Set([...findXmlToolProviders(readModelsJson()), ...providersFromEnv()])];
+	const streamSimple = createXmlToolsStream(() => resolveSettings(layers()));
 	for (const name of providers) {
 		pi.registerProvider(name, { api: XML_TOOLS_API, streamSimple });
 	}
 
-	if (providers.length === 0) {
-		pi.on("session_start", async (_event, ctx) => {
-			ctx.ui.notify(
-				`pi-xml-tools: no provider uses "api": "${XML_TOOLS_API}" in models.json, so XML tool calling is inactive.`,
-				"warning",
-			);
-		});
-	}
+	pi.registerCommand("xml-tools", {
+		description: "View and change pi-xml-tools options",
+		handler: (_args, ctx) => xmlToolsCommand(ctx, { layers, session }),
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		// notify() is a no-op without a UI (print and JSON modes), so fall back to stderr there.
+		const warn = (message: string) => (ctx.hasUI ? ctx.ui.notify(message, "warning") : console.error(message));
+		const warnings = [...readConfig().warnings, ...settingsFromFlags((name) => pi.getFlag(name)).warnings];
+		if (warnings.length) warn(`pi-xml-tools: ignoring invalid settings: ${warnings.join(" ")}`);
+		if (providers.length === 0) {
+			warn(`pi-xml-tools: no provider uses "api": "${XML_TOOLS_API}" in models.json, so XML tool calling is inactive.`);
+		}
+	});
 }

@@ -72,20 +72,40 @@ In `~/.pi/agent/models.json`, change the `api` of the provider you already have 
 
 You can also set `"api": "openai-xml-tools"` on individual models instead of on the whole provider. When the extension starts, it finds every provider that uses this API and attaches itself to them. If it finds none, it shows a warning when the session starts.
 
-### Options (environment variables)
+### Options
 
-| Variable | Default | Effect |
-|---|---|---|
-| `PI_XML_TOOLS_STOP` | on | Sends `stop: ["<tool_result"]` with each request so the server stops the model before it writes a made-up tool result. Set to `0` if your gateway rejects the `stop` field. The extension also cuts the response off on its side, so it still works without this. |
-| `PI_XML_TOOLS_EXTRA_STOP` | none | Extra stop sequences to send, separated by `\|`. |
-| `PI_XML_TOOLS_DECODE_ENTITIES` | off | Decodes `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). `auto` (recommended for such models) decodes a value only when it has entities and no raw `<`, `>` or `&`, so code and HTML with real markup are left alone. `1` always decodes, which also changes values that really contain those entities. Values in `<![CDATA[...]]>` are never decoded. |
-| `PI_XML_TOOLS_INSTRUCTIONS_IN` | `user` | Where Pi's system prompt and the tool instructions go. By default they are put at the start of the first user message, inside `<instructions>` tags, and no system message is sent, because some gateways drop, override or reject client system messages (GenAI's Gemini endpoint does). Set to `system` to send them as a normal system message instead. |
-| `PI_XML_TOOLS_DEBUG` | none | Path to a file. One JSON line is appended per request with the exact payload sent, the raw response text (including any opening tags and anything after a halt), and the parsed tool calls with their errors. The payload holds the whole conversation, so the file can get large and contains whatever was in your session. Auth headers are not included. |
-| `PI_XML_TOOLS_PROVIDERS` | none | Comma-separated provider names to attach to, in addition to those found in models.json. |
+The easiest way to see and change options is the `/xml-tools` command inside Pi. It lists every option with its current value. The selected option shows what it does and where its current value comes from. Enter changes it: options with fixed values cycle through them, and text options open an input. Changes apply to the next request. When you close the list, you can keep the changes for this session only, or save them to your global or project `settings.json`.
+
+Options can also be set in three other places, highest precedence first:
+
+1. **Flags** for one run, for example `pi --xml-tools-decode-entities auto`.
+2. **Environment variables**, for example `PI_XML_TOOLS_DECODE_ENTITIES=auto`.
+3. **`settings.json`**, under an `xmlTools` key: `~/.pi/agent/settings.json` for all projects, or a project's `.pi/settings.json`, which Pi merges in only when the project is trusted. Pi loads this file when it starts, so restart Pi after editing it by hand.
+
+Changes made with `/xml-tools` take precedence over all three for the rest of the session. After a restart, a flag or environment variable for the same option wins over a value saved to `settings.json`, and `/xml-tools` warns about that when you save. Invalid values are skipped and reported in a warning when the session starts.
+
+```json
+{
+  "xmlTools": {
+    "instructionsIn": "user",
+    "decodeEntities": "auto"
+  }
+}
+```
+
+| Setting | Flag | Environment variable | Default | Effect |
+|---|---|---|---|---|
+| `instructionsIn` | `--xml-tools-instructions-in` | `PI_XML_TOOLS_INSTRUCTIONS_IN` | `"user"` | Where Pi's system prompt and the tool instructions go. `"user"` puts them at the start of the first user message, inside `<instructions>` tags, and sends no system message, because some gateways drop, override or reject client system messages (GenAI's Gemini endpoint does). `"system"` sends them as a normal system message. |
+| `decodeEntities` | `--xml-tools-decode-entities` | `PI_XML_TOOLS_DECODE_ENTITIES` | `false` | Decodes `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). `"auto"` (recommended for such models) decodes a value only when it has entities and no raw `<`, `>` or `&`, so code and HTML with real markup are left alone. `true` always decodes, which also changes values that really contain those entities. Values in `<![CDATA[...]]>` are never decoded. |
+| `stopSequences` | `--xml-tools-stop` | `PI_XML_TOOLS_STOP` | `true` | Sends `stop: ["<tool_result"]` with each request so the server stops the model before it writes a made-up tool result. Set to `false` if your gateway rejects the `stop` field. The extension also cuts made-up results off on its side, so it still works without this. |
+| `debugLog` | `--xml-tools-debug` | `PI_XML_TOOLS_DEBUG` | none | Path to a file (a leading `~/` is expanded; `null` or empty turns it off). One JSON line is appended per request with the exact payload sent, the raw response text (including any opening tags and anything after a halt), and the parsed tool calls with their errors. The payload holds the whole conversation, so the file can get large and contains whatever was in your session. Auth headers are not included. |
+| none | none | `PI_XML_TOOLS_PROVIDERS` | none | Comma-separated provider names to attach to, in addition to those found in models.json. This can't be a setting, because Pi's settings can't be read yet when providers are registered. |
+
+Flags and `/xml-tools` take the text forms shown in the list (`user`/`system`, `false`/`auto`/`true`, `true`/`false`). Environment variables also accept `1`/`0`, `yes`/`no` and `on`/`off`.
 
 ## How it works
 
-1. **Request.** Pi's tool definitions are rendered into the system prompt (see `src/prompt.ts`), which by default is sent at the start of the first user message rather than as a system message (see `PI_XML_TOOLS_INSTRUCTIONS_IN`). Earlier tool calls become `<tool_call>` text in the assistant turns, and tool results become `<tool_result>` blocks in user turns. Consecutive user messages are merged into one. The request then goes through Pi's built-in OpenAI Chat Completions client, so auth, retries, usage, cost and cancellation behave the same as with any other provider. No `tools` field is sent.
+1. **Request.** Pi's tool definitions are rendered into the system prompt (see `src/prompt.ts`), which by default is sent at the start of the first user message rather than as a system message (see `instructionsIn` under Options). Earlier tool calls become `<tool_call>` text in the assistant turns, and tool results become `<tool_result>` blocks in user turns. Consecutive user messages are merged into one. The request then goes through Pi's built-in OpenAI Chat Completions client, so auth, retries, usage, cost and cancellation behave the same as with any other provider. No `tools` field is sent.
 2. **Response.** Text is streamed to Pi as it arrives (`src/parser.ts`). A partly written tag is held back until the extension can tell whether it's a tag, so tags never flash up as text. Each `<tool_call>` block becomes a real Pi tool call, with its arguments converted to the right types using the tool's JSON Schema (`src/args.ts`).
 3. **Made-up results.** If the model starts writing `<tool_result` itself, the extension stops the request and discards the rest of the text.
 4. **Malformed calls.** If a call can't be parsed, Pi sends an error result back to the model that shows what it wrote and what was wrong, so the model can try again.

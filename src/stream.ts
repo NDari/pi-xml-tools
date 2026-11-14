@@ -26,41 +26,11 @@ import {
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import { appendFileSync } from "node:fs";
 import { findNameInBody, parseArguments } from "./args.ts";
+import { DEFAULT_SETTINGS, type XmlToolsSettings } from "./config.ts";
 import { HALT_MARKERS, type SplitEvent, ToolCallSplitter } from "./parser.ts";
 import { prependToFirstUser, renderToolInstructions, rewriteMessages } from "./prompt.ts";
 
-export interface XmlToolsSettings {
-	/** Add `stop: ["<tool_result"]` to requests so the server stops the model before it invents a result. */
-	useStopSequences: boolean;
-	/** Extra stop sequences to send. */
-	extraStop: string[];
-	/** Decode XML entities (&amp; etc.) in string values, for models that escape them. See ParseOptions. */
-	decodeEntities: boolean | "auto";
-	/**
-	 * Where the system prompt (Pi's prompt plus the tool instructions) goes:
-	 * "user" (default) prepends it to the first user message; "system" sends it
-	 * as a system message.
-	 */
-	instructionsIn: "user" | "system";
-	/** If set, append one JSON line per request to this file: the payload sent, the raw response text, and the parsed calls. */
-	debugLog?: string;
-}
-
-export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsSettings {
-	const off = /^(0|false|no|off)$/i;
-	return {
-		useStopSequences: !off.test(env.PI_XML_TOOLS_STOP ?? ""),
-		extraStop: (env.PI_XML_TOOLS_EXTRA_STOP ?? "")
-			.split("|")
-			.map((s) => s.trim())
-			.filter(Boolean),
-		decodeEntities: /^auto$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? "")
-			? "auto"
-			: /^(1|true|yes|on)$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? ""),
-		debugLog: env.PI_XML_TOOLS_DEBUG?.trim() || undefined,
-		instructionsIn: /^system$/i.test(env.PI_XML_TOOLS_INSTRUCTIONS_IN?.trim() ?? "") ? "system" : "user",
-	};
-}
+export type { XmlToolsSettings } from "./config.ts";
 
 /** Build the rewritten, tool-free request context. Exported for tests. */
 export function buildRequestContext(
@@ -85,12 +55,14 @@ function newCallId(): string {
 	return `xml_${Date.now().toString(36)}_${callCounter.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEnv()) {
+/** `currentSettings` is called once per request, so changes made with /xml-tools apply to the next request. */
+export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = () => DEFAULT_SETTINGS) {
 	return function streamXmlTools(
 		model: Model<Api>,
 		context: TranscriptContext,
 		options?: SimpleStreamOptions,
 	): AssistantMessageEventStream {
+		const settings = currentSettings();
 		const stream = createAssistantMessageEventStream();
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -270,9 +242,9 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 					signal: controller.signal,
 					onPayload: async (payload, m) => {
 						let next = ((await options?.onPayload?.(payload, m)) ?? payload) as Record<string, any>;
-						if (tools.length && settings.useStopSequences) {
+						if (tools.length && settings.stopSequences) {
 							const existing: string[] = Array.isArray(next.stop) ? next.stop : next.stop ? [next.stop] : [];
-							const stop = [...new Set([...existing, ...HALT_MARKERS.slice(0, 1), ...settings.extraStop])];
+							const stop = [...new Set([...existing, ...HALT_MARKERS.slice(0, 1)])];
 							next = { ...next, stop };
 						}
 						// Never send native tool fields: this model doesn't support them.
