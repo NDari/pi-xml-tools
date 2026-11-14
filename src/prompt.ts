@@ -192,6 +192,25 @@ export function rewriteMessages(messages: Message[], opts: RewriteOptions): Mess
 	return out;
 }
 
+/**
+ * Put the system prompt at the start of the first user message instead of in a
+ * system message. This is the default: some gateways (GenAI's Gemini endpoint
+ * among them) drop, override or reject client system messages, while every
+ * model reads the user turn.
+ */
+export function prependToFirstUser(messages: Message[], instructions: string | undefined): Message[] {
+	if (!instructions?.trim()) return messages;
+	const block: TextContent = { type: "text", text: `<instructions>\n${instructions}\n</instructions>` };
+	const i = messages.findIndex((m) => m.role === "user");
+	if (i === -1) return [{ role: "user", content: [block], timestamp: 0 } satisfies UserMessage, ...messages];
+	const first = messages[i] as UserMessage;
+	const content: (TextContent | ImageContent)[] =
+		typeof first.content === "string" ? [{ type: "text", text: first.content }] : first.content;
+	const out = [...messages];
+	out[i] = { ...first, content: mergeText([block], content) };
+	return out;
+}
+
 function renderAssistant(message: AssistantMessage): string {
 	const parts: string[] = [];
 	for (const block of message.content) {

@@ -27,7 +27,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import { appendFileSync } from "node:fs";
 import { findNameInBody, parseArguments } from "./args.ts";
 import { HALT_MARKERS, type SplitEvent, ToolCallSplitter } from "./parser.ts";
-import { renderToolInstructions, rewriteMessages } from "./prompt.ts";
+import { prependToFirstUser, renderToolInstructions, rewriteMessages } from "./prompt.ts";
 
 export interface XmlToolsSettings {
 	/** Add `stop: ["<tool_result"]` to requests so the server stops the model before it invents a result. */
@@ -36,6 +36,12 @@ export interface XmlToolsSettings {
 	extraStop: string[];
 	/** Decode XML entities (&amp; etc.) in string values, for models that escape them. See ParseOptions. */
 	decodeEntities: boolean | "auto";
+	/**
+	 * Where the system prompt (Pi's prompt plus the tool instructions) goes:
+	 * "user" (default) prepends it to the first user message; "system" sends it
+	 * as a system message.
+	 */
+	instructionsIn: "user" | "system";
 	/** If set, append one JSON line per request to this file: the payload sent, the raw response text, and the parsed calls. */
 	debugLog?: string;
 }
@@ -52,18 +58,25 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsS
 			? "auto"
 			: /^(1|true|yes|on)$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? ""),
 		debugLog: env.PI_XML_TOOLS_DEBUG?.trim() || undefined,
+		instructionsIn: /^system$/i.test(env.PI_XML_TOOLS_INSTRUCTIONS_IN?.trim() ?? "") ? "system" : "user",
 	};
 }
 
 /** Build the rewritten, tool-free request context. Exported for tests. */
-export function buildRequestContext(model: Model<Api>, context: TranscriptContext): { context: TranscriptContext; tools: Tool[] } {
+export function buildRequestContext(
+	model: Model<Api>,
+	context: TranscriptContext,
+	instructionsIn: XmlToolsSettings["instructionsIn"] = "user",
+): { context: TranscriptContext; tools: Tool[] } {
 	const tools = getCurrentTools(context.messages);
 	const basePrompt = getCurrentSystemPrompt(context.messages);
 	const systemPrompt = tools.length ? [basePrompt, renderToolInstructions(tools)].filter(Boolean).join("\n\n") : basePrompt;
 	const messages = rewriteMessages(collapseSystemMessages(context).messages, {
 		supportsImages: model.input.includes("image"),
 	});
-	return { context: normalizeContext({ systemPrompt, messages, tools: [] }), tools };
+	if (instructionsIn === "system") return { context: normalizeContext({ systemPrompt, messages, tools: [] }), tools };
+	// No systemPrompt and no tools, so normalizeContext adds no system message.
+	return { context: normalizeContext({ messages: prependToFirstUser(messages, systemPrompt), tools: [] }), tools };
 }
 
 let callCounter = 0;
@@ -247,7 +260,7 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 			};
 
 			try {
-				const { context: requestContext, tools: currentTools } = buildRequestContext(model, context);
+				const { context: requestContext, tools: currentTools } = buildRequestContext(model, context, settings.instructionsIn);
 				tools.push(...currentTools);
 				const splitter = new ToolCallSplitter();
 
