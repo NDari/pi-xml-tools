@@ -24,6 +24,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { appendFileSync } from "node:fs";
 import { findNameInBody, parseArguments } from "./args.ts";
 import { HALT_MARKERS, type SplitEvent, ToolCallSplitter } from "./parser.ts";
 import { renderToolInstructions, rewriteMessages } from "./prompt.ts";
@@ -33,8 +34,10 @@ export interface XmlToolsSettings {
 	useStopSequences: boolean;
 	/** Extra stop sequences to send. */
 	extraStop: string[];
-	/** Decode XML entities (&amp; etc.) in string values, for models that escape them. */
-	decodeEntities: boolean;
+	/** Decode XML entities (&amp; etc.) in string values, for models that escape them. See ParseOptions. */
+	decodeEntities: boolean | "auto";
+	/** If set, append one JSON line per request to this file: the payload sent, the raw response text, and the parsed calls. */
+	debugLog?: string;
 }
 
 export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsSettings {
@@ -45,7 +48,10 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): XmlToolsS
 			.split("|")
 			.map((s) => s.trim())
 			.filter(Boolean),
-		decodeEntities: /^(1|true|yes|on)$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? ""),
+		decodeEntities: /^auto$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? "")
+			? "auto"
+			: /^(1|true|yes|on)$/i.test(env.PI_XML_TOOLS_DECODE_ENTITIES ?? ""),
+		debugLog: env.PI_XML_TOOLS_DEBUG?.trim() || undefined,
 	};
 }
 
@@ -101,8 +107,36 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 
 			let started = false;
 			let finished = false;
+			// Debug log state (only used when settings.debugLog is set).
+			let sentPayload: unknown;
+			let rawText = "";
+			let rawThinking = "";
+			let halted = false;
+			const writeDebug = () => {
+				if (!settings.debugLog) return;
+				try {
+					const record = {
+						time: new Date().toISOString(),
+						provider: model.provider,
+						model: model.id,
+						stopReason: output.stopReason,
+						errorMessage: output.errorMessage,
+						haltedOnInventedResult: halted,
+						toolCalls: output.content
+							.filter((b): b is ToolCall => b.type === "toolCall")
+							.map((b) => ({ name: b.name, arguments: b.arguments, argumentsError: b.argumentsError })),
+						rawText,
+						...(rawThinking ? { rawThinking } : {}),
+						request: sentPayload,
+					};
+					appendFileSync(settings.debugLog, `${JSON.stringify(record)}\n`);
+				} catch {
+					// Debug logging must never break a request.
+				}
+			};
 			const end = () => {
 				outerSignal?.removeEventListener("abort", onOuterAbort);
+				writeDebug();
 				stream.end();
 			};
 			const fail = (reason: "error" | "aborted", message: string) => {
@@ -230,6 +264,7 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 						}
 						// Never send native tool fields: this model doesn't support them.
 						const { tools: _t, tool_choice: _c, parallel_tool_calls: _p, ...rest } = next;
+						sentPayload = rest;
 						return rest;
 					},
 				};
@@ -245,8 +280,10 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 							break;
 						case "text_delta":
 							lastUsage = event.partial.usage;
+							rawText += event.delta;
 							handle(splitter.push(event.delta));
 							if (splitter.isHalted) {
+								halted = true;
 								// The model began writing a tool result itself. Everything we need is already parsed.
 								handle(splitter.finish());
 								closeOpenBlocks();
@@ -269,6 +306,7 @@ export function createXmlToolsStream(settings: XmlToolsSettings = settingsFromEn
 						case "thinking_delta":
 							if (thinkingIndex === -1) break;
 							(output.content[thinkingIndex] as ThinkingContent).thinking += event.delta;
+							rawThinking += event.delta;
 							stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta: event.delta, partial: output });
 							break;
 						case "thinking_end": {

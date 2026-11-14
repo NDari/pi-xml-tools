@@ -78,7 +78,8 @@ You can also set `"api": "openai-xml-tools"` on individual models instead of on 
 |---|---|---|
 | `PI_XML_TOOLS_STOP` | on | Sends `stop: ["<tool_result"]` with each request so the server stops the model before it writes a made-up tool result. Set to `0` if your gateway rejects the `stop` field. The extension also cuts the response off on its side, so it still works without this. |
 | `PI_XML_TOOLS_EXTRA_STOP` | none | Extra stop sequences to send, separated by `\|`. |
-| `PI_XML_TOOLS_DECODE_ENTITIES` | off | Set to `1` to decode `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). Off by default because it also changes values that really contain those entities, such as HTML. Values in `<![CDATA[...]]>` are never decoded. |
+| `PI_XML_TOOLS_DECODE_ENTITIES` | off | Decodes `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). `auto` (recommended for such models) decodes a value only when it has entities and no raw `<`, `>` or `&`, so code and HTML with real markup are left alone. `1` always decodes, which also changes values that really contain those entities. Values in `<![CDATA[...]]>` are never decoded. |
+| `PI_XML_TOOLS_DEBUG` | none | Path to a file. One JSON line is appended per request with the exact payload sent, the raw response text (including any opening tags and anything after a halt), and the parsed tool calls with their errors. The payload holds the whole conversation, so the file can get large and contains whatever was in your session. Auth headers are not included. |
 | `PI_XML_TOOLS_PROVIDERS` | none | Comma-separated provider names to attach to, in addition to those found in models.json. |
 
 ## How it works

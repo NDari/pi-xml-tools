@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findNameInBody, parseArguments, serializeToolCall } from "../src/args.ts";
+import { findNameInBody, parseArguments, serializeToolCall, shouldDecode } from "../src/args.ts";
 
 // Schemas matching Pi's built-in tools.
 const bash = {
@@ -177,5 +177,23 @@ test("entity decoding is off by default and opt-in", () => {
 	assert.deepEqual(parseArguments(`<parameter name="path">&lt;a&gt;</parameter><parameter name="limit">5</parameter>`, read, false, { decodeEntities: true }).args, {
 		path: "<a>",
 		limit: 5,
+	});
+});
+
+test("auto entity decoding only touches fully escaped values", () => {
+	// Verbatim Gemma 3 27B values: escaped, with raw quotes mixed in.
+	assert.equal(shouldDecode('hi &lt;friend&gt; &amp; "co"', "auto"), true);
+	assert.equal(shouldDecode("hi &amp; &quot;co&quot;", "auto"), true);
+	// Raw markup means the model isn't escaping, so entities are meant literally.
+	assert.equal(shouldDecode('<a href="?a=1&amp;b=2">Tom &amp; Jerry</a>', "auto"), false);
+	assert.equal(shouldDecode("a && b &amp; c", "auto"), false);
+	assert.equal(shouldDecode("no entities here", "auto"), false);
+	assert.equal(shouldDecode("&amp;", false), false);
+	assert.equal(shouldDecode("<b>&amp;</b>", true), true);
+
+	const body = `<parameter name="path">a.ts</parameter><parameter name="edits"><item><oldText><p>Tom &amp; Jerry</p></oldText><newText>hi &lt;friend&gt; &amp; "co"</newText></item></parameter>`;
+	assert.deepEqual(parseArguments(body, edit, false, { decodeEntities: "auto" }).args, {
+		path: "a.ts",
+		edits: [{ oldText: "<p>Tom &amp; Jerry</p>", newText: 'hi <friend> & "co"' }],
 	});
 });

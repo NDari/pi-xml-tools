@@ -18,12 +18,15 @@ export type JsonObject = Record<string, unknown>;
 
 export interface ParseOptions {
 	/**
-	 * Decode the XML entities &lt; &gt; &amp; &quot; &apos; in string values.
-	 * For models that XML-escape values despite being told not to. Off by
-	 * default, because it changes values that really contain "&amp;" (HTML, for one).
+	 * Decode the XML entities &lt; &gt; &amp; &quot; &apos; in string values,
+	 * for models that XML-escape values despite being told not to.
+	 *   - false (default): never decode.
+	 *   - true: always decode. Wrong for values that really contain "&amp;" (HTML, for one).
+	 *   - "auto": decode a value only if it contains entities and no raw < > or &,
+	 *     i.e. it looks fully escaped. Values with raw markup (HTML) are left alone.
 	 * Values wrapped in CDATA are never decoded.
 	 */
-	decodeEntities?: boolean;
+	decodeEntities?: boolean | "auto";
 }
 
 export interface ParsedArguments {
@@ -270,7 +273,10 @@ function pickVariant(schema: Schema | undefined, type: string): Schema | undefin
 export function convertValue(rawValue: string, schema: Schema | undefined, opts: ParseOptions = {}): Converted {
 	const cdata = CDATA.exec(rawValue);
 	const raw = cdata ? cdata[1] : rawValue;
-	const text = () => (opts.decodeEntities && !cdata ? decodeEntities(trimBlock(raw)) : trimBlock(raw));
+	const text = () => {
+		const value = trimBlock(raw);
+		return !cdata && shouldDecode(value, opts.decodeEntities) ? decodeEntities(value) : value;
+	};
 	const types = schemaTypes(schema);
 	const trimmed = raw.trim();
 
@@ -340,6 +346,16 @@ export function convertValue(rawValue: string, schema: Schema | undefined, opts:
 }
 
 const ENTITIES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+
+const ENTITY = /&(lt|gt|amp|quot|apos);/;
+/** A < or > anywhere, or an & that doesn't start one of the entities above. */
+const RAW_MARKUP = /[<>]|&(?!(?:lt|gt|amp|quot|apos);)/;
+
+/** Whether a string value should be entity-decoded under the given mode. Exported for tests. */
+export function shouldDecode(value: string, mode: ParseOptions["decodeEntities"]): boolean {
+	if (mode === "auto") return ENTITY.test(value) && !RAW_MARKUP.test(value);
+	return mode === true;
+}
 
 /** Single pass, so "&amp;lt;" becomes "&lt;", not "<". */
 function decodeEntities(s: string): string {
