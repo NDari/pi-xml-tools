@@ -123,3 +123,16 @@ test("every option has a description, an env var and a flag", () => {
 	}
 	assert.deepEqual(OPTIONS.map((o) => o.key).sort(), Object.keys(DEFAULT_SETTINGS).sort());
 });
+
+test("rateLimit switch", () => {
+	assert.equal(DEFAULT_SETTINGS.rateLimit, true);
+	assert.deepEqual(parseOptionText("rateLimit", "off"), { ok: true, value: false });
+	assert.equal(parseOptionText("rateLimit", "sometimes").ok, false);
+	assert.equal(settingsFromEnv({ PI_XML_TOOLS_RATE_LIMIT: "0" }).rateLimit, false);
+	assert.deepEqual(parseConfig({ rateLimit: false }).settings, { rateLimit: false });
+	assert.deepEqual(parseConfig({ rateLimit: "no" }).warnings, ["xmlTools.rateLimit must be true or false."]);
+	// Turning it off leaves the limits alone, for when it's turned back on.
+	const r = resolveSettings({ settings: { requestRate: 60 }, env: {}, flags: { rateLimit: false }, session: {} });
+	assert.equal(r.rateLimit, false);
+	assert.equal(r.requestRate, 60);
+});

@@ -58,6 +58,9 @@ export function buildRequestContext(
 	return { context: normalizeContext({ messages: prependToFirstUser(messages, systemPrompt), tools: [] }), tools };
 }
 
+/** Stands in for a limiter reservation when rate limiting is off. */
+const NO_RESERVATION = { estimate: 0, settle() {}, reject() {} };
+
 /** Count the server-reported usage against the rate limit, and calibrate the token estimate. */
 function settleUsage(reservation: { settle(u: { totalTokens: number; promptTokens: number }): void }, usage: AssistantMessage["usage"]) {
 	reservation.settle({
@@ -93,7 +96,8 @@ export function createXmlToolsStream(
 	let statusTimer: ReturnType<typeof setInterval> | undefined;
 	const refreshStatus = () => {
 		if (waitingText) return hooks.onStatus?.(waitingText);
-		const usage = statusProvider ? limiters.get(statusProvider)?.usage() : undefined;
+		const enabled = currentSettings().rateLimit;
+		const usage = enabled && statusProvider ? limiters.get(statusProvider)?.usage() : undefined;
 		if (!usage || usage.requests === 0) {
 			if (statusTimer) clearInterval(statusTimer);
 			statusTimer = undefined;
@@ -323,11 +327,12 @@ export function createXmlToolsStream(
 				const chars = JSON.stringify(requestContext.messages).length;
 				for (let attempt = 0; ; attempt++) {
 					// Wait until this request fits in the rolling window (no wait when it already does).
-					const { reservation, waitedMs } = await limiter.acquire(chars, limits, outerSignal, (ms) =>
-						showWait(ms, "rate limit"),
-					);
+					// With rate limiting off, nothing is waited for, counted or shown.
+					const { reservation, waitedMs } = settings.rateLimit
+						? await limiter.acquire(chars, limits, outerSignal, (ms) => showWait(ms, "rate limit"))
+						: { reservation: NO_RESERVATION, waitedMs: 0 };
 					rateLimitWaitMs += waitedMs;
-					trackProvider(model.provider);
+					if (settings.rateLimit) trackProvider(model.provider);
 					const inner = openAICompletionsApi().streamSimple(innerModel, requestContext, innerOptions);
 					let lastUsage = output.usage;
 					let retry = false;
@@ -400,6 +405,7 @@ export function createXmlToolsStream(
 							case "error": {
 								// A 429 arrives before anything has streamed, so it can be retried without Pi noticing.
 								if (
+									settings.rateLimit &&
 									!started &&
 									event.reason === "error" &&
 									attempt < MAX_RATE_LIMIT_RETRIES &&

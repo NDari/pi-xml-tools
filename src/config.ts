@@ -29,6 +29,8 @@ export interface XmlToolsSettings {
 	decodeEntities: DecodeEntities;
 	/** Add `stop: ["<tool_result"]` to requests so the server stops the model before it invents a result. */
 	stopSequences: boolean;
+	/** Whether requestRate and tokenRate are enforced (and the footer tally shown). */
+	rateLimit: boolean;
 	/** Most requests per minute per provider (rolling 60s window); 0 for no limit. */
 	requestRate: number;
 	/** Most tokens (input plus output) per minute per provider (rolling 60s window); 0 for no limit. */
@@ -45,6 +47,7 @@ export const DEFAULT_SETTINGS: XmlToolsSettings = {
 	instructionsIn: "user",
 	decodeEntities: false,
 	stopSequences: true,
+	rateLimit: true,
 	requestRate: 120,
 	tokenRate: 500_000,
 	debugLog: undefined,
@@ -92,6 +95,15 @@ export const OPTIONS: OptionInfo[] = [
 			'Sends stop: ["<tool_result"] so the server stops the model before it writes a made-up tool result. Turn off if your gateway rejects the stop field; the extension also cuts made-up results off itself.',
 		env: "PI_XML_TOOLS_STOP",
 		flag: "xml-tools-stop",
+		choices: ["true", "false"],
+	},
+	{
+		key: "rateLimit",
+		label: "Rate limiting",
+		description:
+			"Turns the request and token limits below on or off. When off, requests are sent right away, a 429 goes straight to Pi's own retry, and the footer tally is hidden. The limits keep their values for when it's turned back on.",
+		env: "PI_XML_TOOLS_RATE_LIMIT",
+		flag: "xml-tools-rate-limit",
 		choices: ["true", "false"],
 	},
 	{
@@ -149,6 +161,7 @@ export function parseOptionText(key: SettingKey, text: string): ParsedValue {
 			if (OFF.test(t)) return { ok: true, value: false };
 			return bad();
 		case "stopSequences":
+		case "rateLimit":
 			if (ON.test(t)) return { ok: true, value: true };
 			if (OFF.test(t)) return { ok: true, value: false };
 			return bad();
@@ -213,6 +226,8 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): SettingsL
 	};
 	const stop = get("PI_XML_TOOLS_STOP");
 	if (stop !== undefined) out.stopSequences = !OFF.test(stop);
+	const rateLimit = get("PI_XML_TOOLS_RATE_LIMIT");
+	if (rateLimit !== undefined) out.rateLimit = !OFF.test(rateLimit);
 	const decode = get("PI_XML_TOOLS_DECODE_ENTITIES");
 	if (decode !== undefined) out.decodeEntities = /^auto$/i.test(decode) ? "auto" : ON.test(decode);
 	const where = get("PI_XML_TOOLS_INSTRUCTIONS_IN");
@@ -275,7 +290,8 @@ export function parseConfig(raw: unknown): ParsedConfig {
 				else warn('must be true, false or "auto".');
 				break;
 			case "stopSequences":
-				if (typeof value === "boolean") out.stopSequences = value;
+			case "rateLimit":
+				if (typeof value === "boolean") out[key] = value;
 				else warn("must be true or false.");
 				break;
 			case "requestRate":

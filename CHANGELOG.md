@@ -1,6 +1,7 @@
-## [Unreleased]
+## [0.4.0]
 
 - Added: a footer status with the last minute's tally, e.g. `xml-tools: 14/120 req · 182k/500k tok (60s)`. It updates every second and disappears when nothing was sent in the last minute.
+- Added: a `rateLimit` switch (default `true`). Turned off, the extension sends requests right away, leaves 429s to Pi's own retry and hides the footer tally, while `requestRate` and `tokenRate` keep their values.
 
 ## [0.3.0]
 
