@@ -1,3 +1,8 @@
+## [0.3.0]
+
+- Added: client-side rate limiting with `requestRate` (default 120 per minute) and `tokenRate` (default 500,000 per minute) over a rolling 60-second window per provider. Requests wait until they fit, with a countdown in the status bar, and a `429` is retried up to 5 times before Pi sees it. Set either to `0` for no limit.
+- Added: each debug log record includes `rateLimit: { waitedMs, retries }`.
+
 ## [0.2.0]
 
 - Changed: Pi's system prompt and the tool instructions are now sent at the start of the first user message, inside `<instructions>` tags, instead of as a system message. Some gateways (GenAI's Gemini endpoint among them) drop, override or reject client system messages. Set `instructionsIn` to `system` (in `/xml-tools`, `settings.json`, `--xml-tools-instructions-in` or `PI_XML_TOOLS_INSTRUCTIONS_IN`) for the old behavior.

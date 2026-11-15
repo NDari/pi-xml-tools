@@ -98,10 +98,21 @@ Changes made with `/xml-tools` take precedence over all three for the rest of th
 | `instructionsIn` | `--xml-tools-instructions-in` | `PI_XML_TOOLS_INSTRUCTIONS_IN` | `"user"` | Where Pi's system prompt and the tool instructions go. `"user"` puts them at the start of the first user message, inside `<instructions>` tags, and sends no system message, because some gateways drop, override or reject client system messages (GenAI's Gemini endpoint does). `"system"` sends them as a normal system message. |
 | `decodeEntities` | `--xml-tools-decode-entities` | `PI_XML_TOOLS_DECODE_ENTITIES` | `false` | Decodes `&lt; &gt; &amp; &quot; &apos;` in string values, for models that XML-escape them even when told not to (Gemma 3 does). `"auto"` (recommended for such models) decodes a value only when it has entities and no raw `<`, `>` or `&`, so code and HTML with real markup are left alone. `true` always decodes, which also changes values that really contain those entities. Values in `<![CDATA[...]]>` are never decoded. |
 | `stopSequences` | `--xml-tools-stop` | `PI_XML_TOOLS_STOP` | `true` | Sends `stop: ["<tool_result"]` with each request so the server stops the model before it writes a made-up tool result. Set to `false` if your gateway rejects the `stop` field. The extension also cuts made-up results off on its side, so it still works without this. |
+| `requestRate` | `--xml-tools-request-rate` | `PI_XML_TOOLS_REQUEST_RATE` | `120` | Most requests per minute to one provider, over a rolling 60-second window. See [Rate limits](#rate-limits). `0` for no limit. |
+| `tokenRate` | `--xml-tools-token-rate` | `PI_XML_TOOLS_TOKEN_RATE` | `500000` | Most tokens (input plus output) per minute to one provider, over a rolling 60-second window. Flags, variables and `/xml-tools` also accept `500k` or `1.5m`. See [Rate limits](#rate-limits). `0` for no limit. |
 | `debugLog` | `--xml-tools-debug` | `PI_XML_TOOLS_DEBUG` | none | Path to a file (a leading `~/` is expanded; `null` or empty turns it off). One JSON line is appended per request with the exact payload sent, the raw response text (including any opening tags and anything after a halt), and the parsed tool calls with their errors. The payload holds the whole conversation, so the file can get large and contains whatever was in your session. Auth headers are not included. |
 | none | none | `PI_XML_TOOLS_PROVIDERS` | none | Comma-separated provider names to attach to, in addition to those found in models.json. This can't be a setting, because Pi's settings can't be read yet when providers are registered. |
 
 Flags and `/xml-tools` take the text forms shown in the list (`user`/`system`, `false`/`auto`/`true`, `true`/`false`). Environment variables also accept `1`/`0`, `yes`/`no` and `on`/`off`.
+
+### Rate limits
+
+Many gateways limit requests and tokens per minute and answer `429` when a request goes over. Pi retries those itself, but only 3 times, after 2, 4 and 8 seconds, which is often too short for a one-minute window. So the extension keeps its own record of what it sent to each provider in the last 60 seconds and works within `requestRate` and `tokenRate`:
+
+- **Before sending**, it estimates the request's input tokens and, if the request wouldn't fit in the window, waits until enough older requests have left it. The status bar shows the countdown, and Esc cancels. The estimate starts at 4 characters per token and is corrected with the usage the server reports for each response. Each request then counts with its real total (input plus output).
+- **If the server still answers 429** (for example because another Pi session uses the same key), the request is retried here, up to 5 times, before Pi sees an error. It waits until the oldest of this session's requests leaves the window, or, if there are none, 5, 10, 20, 40 and then 60 seconds. Errors that mean the quota is used up (`insufficient_quota`, billing) are not retried.
+
+The record is per Pi process, so several sessions sharing one key each see only their own requests and rely on the 429 retry. The debug log records each request's wait and retry count under `rateLimit`.
 
 ## How it works
 

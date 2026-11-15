@@ -29,6 +29,15 @@ import { findNameInBody, parseArguments } from "./args.ts";
 import { DEFAULT_SETTINGS, type XmlToolsSettings } from "./config.ts";
 import { HALT_MARKERS, type SplitEvent, ToolCallSplitter } from "./parser.ts";
 import { prependToFirstUser, renderToolInstructions, rewriteMessages } from "./prompt.ts";
+import { abortableSleep, isRateLimitError, RateLimiter } from "./rate-limit.ts";
+
+/** How many times a rate-limited (429) request is retried here before the error goes to Pi's own retry. */
+export const MAX_RATE_LIMIT_RETRIES = 5;
+
+export interface StreamHooks {
+	/** Show (or with undefined, clear) a short status, e.g. while waiting for the rate limit. */
+	onStatus?: (text: string | undefined) => void;
+}
 
 export type { XmlToolsSettings } from "./config.ts";
 
@@ -49,6 +58,14 @@ export function buildRequestContext(
 	return { context: normalizeContext({ messages: prependToFirstUser(messages, systemPrompt), tools: [] }), tools };
 }
 
+/** Count the server-reported usage against the rate limit, and calibrate the token estimate. */
+function settleUsage(reservation: { settle(u: { totalTokens: number; promptTokens: number }): void }, usage: AssistantMessage["usage"]) {
+	reservation.settle({
+		totalTokens: usage.totalTokens,
+		promptTokens: usage.input + usage.cacheRead + usage.cacheWrite,
+	});
+}
+
 let callCounter = 0;
 function newCallId(): string {
 	callCounter = (callCounter + 1) % 1_000_000;
@@ -56,7 +73,20 @@ function newCallId(): string {
 }
 
 /** `currentSettings` is called once per request, so changes made with /xml-tools apply to the next request. */
-export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = () => DEFAULT_SETTINGS) {
+export function createXmlToolsStream(
+	currentSettings: () => XmlToolsSettings = () => DEFAULT_SETTINGS,
+	hooks: StreamHooks = {},
+) {
+	// One limiter per provider: the quota belongs to the API key, and lives as long as Pi runs.
+	const limiters = new Map<string, RateLimiter>();
+	const limiterFor = (provider: string) => {
+		let limiter = limiters.get(provider);
+		if (!limiter) limiters.set(provider, (limiter = new RateLimiter()));
+		return limiter;
+	};
+	const showWait = (ms: number, why: string) =>
+		hooks.onStatus?.(ms > 0 ? `xml-tools: ${why}, sending in ${Math.ceil(ms / 1000)}s (Esc cancels)` : undefined);
+
 	return function streamXmlTools(
 		model: Model<Api>,
 		context: TranscriptContext,
@@ -97,6 +127,8 @@ export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = (
 			let rawText = "";
 			let rawThinking = "";
 			let halted = false;
+			let rateLimitWaitMs = 0;
+			let rateLimitRetries = 0;
 			const writeDebug = () => {
 				if (!settings.debugLog) return;
 				try {
@@ -110,6 +142,7 @@ export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = (
 						toolCalls: output.content
 							.filter((b): b is ToolCall => b.type === "toolCall")
 							.map((b) => ({ name: b.name, arguments: b.arguments, argumentsError: b.argumentsError })),
+						rateLimit: { waitedMs: rateLimitWaitMs, retries: rateLimitRetries },
 						rawText,
 						...(rawThinking ? { rawThinking } : {}),
 						request: sentPayload,
@@ -121,6 +154,7 @@ export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = (
 			};
 			const end = () => {
 				outerSignal?.removeEventListener("abort", onOuterAbort);
+				hooks.onStatus?.(undefined);
 				writeDebug();
 				stream.end();
 			};
@@ -254,80 +288,115 @@ export function createXmlToolsStream(currentSettings: () => XmlToolsSettings = (
 					},
 				};
 
-				const inner = openAICompletionsApi().streamSimple(innerModel, requestContext, innerOptions);
-				let lastUsage = output.usage;
-				for await (const event of inner) {
-					if (finished) break;
-					switch (event.type) {
-						case "start":
-							started = true;
-							stream.push({ type: "start", partial: output });
-							break;
-						case "text_delta":
-							lastUsage = event.partial.usage;
-							rawText += event.delta;
-							handle(splitter.push(event.delta));
-							if (splitter.isHalted) {
-								halted = true;
-								// The model began writing a tool result itself. Everything we need is already parsed.
+				const limiter = limiterFor(model.provider);
+				const limits = { requestRate: settings.requestRate, tokenRate: settings.tokenRate };
+				const chars = JSON.stringify(requestContext.messages).length;
+				for (let attempt = 0; ; attempt++) {
+					// Wait until this request fits in the rolling window (no wait when it already does).
+					const { reservation, waitedMs } = await limiter.acquire(chars, limits, outerSignal, (ms) =>
+						showWait(ms, "rate limit"),
+					);
+					rateLimitWaitMs += waitedMs;
+					const inner = openAICompletionsApi().streamSimple(innerModel, requestContext, innerOptions);
+					let lastUsage = output.usage;
+					let retry = false;
+					for await (const event of inner) {
+						if (finished) break;
+						switch (event.type) {
+							case "start":
+								started = true;
+								stream.push({ type: "start", partial: output });
+								break;
+							case "text_delta":
+								lastUsage = event.partial.usage;
+								rawText += event.delta;
+								handle(splitter.push(event.delta));
+								if (splitter.isHalted) {
+									halted = true;
+									// The model began writing a tool result itself. Everything we need is already parsed.
+									handle(splitter.finish());
+									closeOpenBlocks();
+									output.usage = { ...lastUsage };
+									settleUsage(reservation, output.usage);
+									output.responseId = event.partial.responseId;
+									output.responseModel = event.partial.responseModel;
+									output.stopReason = output.content.some((b) => b.type === "toolCall") ? "toolUse" : "stop";
+									finished = true;
+									stream.push({ type: "done", reason: output.stopReason, message: output });
+									controller.abort();
+									end();
+								}
+								break;
+							case "thinking_start":
+								closeText();
+								output.content.push({ type: "thinking", thinking: "" });
+								thinkingIndex = output.content.length - 1;
+								stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+								break;
+							case "thinking_delta":
+								if (thinkingIndex === -1) break;
+								(output.content[thinkingIndex] as ThinkingContent).thinking += event.delta;
+								rawThinking += event.delta;
+								stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta: event.delta, partial: output });
+								break;
+							case "thinking_end": {
+								if (thinkingIndex === -1) break;
+								const src = event.partial.content[event.contentIndex];
+								if (src?.type === "thinking" && src.thinkingSignature) {
+									(output.content[thinkingIndex] as ThinkingContent).thinkingSignature = src.thinkingSignature;
+								}
+								closeThinking();
+								break;
+							}
+							case "done": {
 								handle(splitter.finish());
 								closeOpenBlocks();
-								output.usage = { ...lastUsage };
-								output.responseId = event.partial.responseId;
-								output.responseModel = event.partial.responseModel;
-								output.stopReason = output.content.some((b) => b.type === "toolCall") ? "toolUse" : "stop";
+								const msg = event.message;
+								output.usage = msg.usage;
+								settleUsage(reservation, msg.usage);
+								output.responseId = msg.responseId;
+								output.responseModel = msg.responseModel;
+								output.rawStopReason = msg.rawStopReason;
+								const hasCalls = output.content.some((b) => b.type === "toolCall");
+								output.stopReason = hasCalls ? "toolUse" : event.reason === "toolUse" ? "stop" : event.reason;
 								finished = true;
 								stream.push({ type: "done", reason: output.stopReason, message: output });
-								controller.abort();
 								end();
+								break;
 							}
-							break;
-						case "thinking_start":
-							closeText();
-							output.content.push({ type: "thinking", thinking: "" });
-							thinkingIndex = output.content.length - 1;
-							stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-							break;
-						case "thinking_delta":
-							if (thinkingIndex === -1) break;
-							(output.content[thinkingIndex] as ThinkingContent).thinking += event.delta;
-							rawThinking += event.delta;
-							stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta: event.delta, partial: output });
-							break;
-						case "thinking_end": {
-							if (thinkingIndex === -1) break;
-							const src = event.partial.content[event.contentIndex];
-							if (src?.type === "thinking" && src.thinkingSignature) {
-								(output.content[thinkingIndex] as ThinkingContent).thinkingSignature = src.thinkingSignature;
+							case "error": {
+								// A 429 arrives before anything has streamed, so it can be retried without Pi noticing.
+								if (
+									!started &&
+									event.reason === "error" &&
+									attempt < MAX_RATE_LIMIT_RETRIES &&
+									isRateLimitError(event.error.errorMessage)
+								) {
+									reservation.reject();
+									retry = true;
+									break;
+								}
+								handle(splitter.finish());
+								output.usage = event.error.usage;
+								fail(event.reason, event.error.errorMessage ?? "Request failed");
+								break;
 							}
-							closeThinking();
-							break;
+							default:
+								// text_start/text_end/toolcall_* from the inner stream are re-derived above.
+								break;
 						}
-						case "done": {
-							handle(splitter.finish());
-							closeOpenBlocks();
-							const msg = event.message;
-							output.usage = msg.usage;
-							output.responseId = msg.responseId;
-							output.responseModel = msg.responseModel;
-							output.rawStopReason = msg.rawStopReason;
-							const hasCalls = output.content.some((b) => b.type === "toolCall");
-							output.stopReason = hasCalls ? "toolUse" : event.reason === "toolUse" ? "stop" : event.reason;
-							finished = true;
-							stream.push({ type: "done", reason: output.stopReason, message: output });
-							end();
-							break;
-						}
-						case "error": {
-							handle(splitter.finish());
-							output.usage = event.error.usage;
-							fail(event.reason, event.error.errorMessage ?? "Request failed");
-							break;
-						}
-						default:
-							// text_start/text_end/toolcall_* from the inner stream are re-derived above.
-							break;
+						if (retry) break;
 					}
+					if (!retry) break;
+					// Rate limited by the server: wait until the window frees up, counting down in the status bar.
+					rateLimitRetries++;
+					const delay = limiter.retryDelay(attempt);
+					const until = Date.now() + delay;
+					for (let left = delay; left > 0; left = until - Date.now()) {
+						showWait(left, "rate limited by the server");
+						await abortableSleep(Math.min(left, 1_000), outerSignal);
+					}
+					rateLimitWaitMs += delay;
 				}
 				if (!finished) {
 					fail(outerSignal?.aborted ? "aborted" : "error", "Stream ended without a final event");

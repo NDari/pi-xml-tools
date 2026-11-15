@@ -79,7 +79,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const providers = [...new Set([...findXmlToolProviders(readModelsJson()), ...providersFromEnv()])];
-	const streamSimple = createXmlToolsStream(() => resolveSettings(layers()));
+	// The latest session context, so the stream can show rate-limit waits in the status bar.
+	let statusUi: { setStatus(key: string, text: string | undefined): void } | undefined;
+	const streamSimple = createXmlToolsStream(() => resolveSettings(layers()), {
+		onStatus: (text) => statusUi?.setStatus("xml-tools", text),
+	});
 	for (const name of providers) {
 		pi.registerProvider(name, { api: XML_TOOLS_API, streamSimple });
 	}
@@ -90,6 +94,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.hasUI) statusUi = ctx.ui;
 		// notify() is a no-op without a UI (print and JSON modes), so fall back to stderr there.
 		const warn = (message: string) => (ctx.hasUI ? ctx.ui.notify(message, "warning") : console.error(message));
 		const warnings = [...readConfig().warnings, ...settingsFromFlags((name) => pi.getFlag(name)).warnings];

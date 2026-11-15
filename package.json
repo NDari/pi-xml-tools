@@ -1,6 +1,6 @@
 {
   "name": "pi-xml-tools",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Prompt-based (XML) tool calling for OpenAI-compatible models without native tool support, as a Pi extension.",
   "type": "module",
   "keywords": ["pi-package"],

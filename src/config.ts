@@ -29,6 +29,10 @@ export interface XmlToolsSettings {
 	decodeEntities: DecodeEntities;
 	/** Add `stop: ["<tool_result"]` to requests so the server stops the model before it invents a result. */
 	stopSequences: boolean;
+	/** Most requests per minute per provider (rolling 60s window); 0 for no limit. */
+	requestRate: number;
+	/** Most tokens (input plus output) per minute per provider (rolling 60s window); 0 for no limit. */
+	tokenRate: number;
 	/** If set, append one JSON line per request to this file: the payload sent, the raw response text, and the parsed calls. */
 	debugLog?: string;
 }
@@ -41,6 +45,8 @@ export const DEFAULT_SETTINGS: XmlToolsSettings = {
 	instructionsIn: "user",
 	decodeEntities: false,
 	stopSequences: true,
+	requestRate: 120,
+	tokenRate: 500_000,
 	debugLog: undefined,
 };
 
@@ -89,6 +95,22 @@ export const OPTIONS: OptionInfo[] = [
 		choices: ["true", "false"],
 	},
 	{
+		key: "requestRate",
+		label: "Requests per minute",
+		description:
+			"Most requests to send per minute to one provider, counted over a rolling 60-second window. A request that doesn't fit waits until it does, and a 429 is retried once the window frees up, instead of relying on Pi's short retry. 0 for no limit.",
+		env: "PI_XML_TOOLS_REQUEST_RATE",
+		flag: "xml-tools-request-rate",
+	},
+	{
+		key: "tokenRate",
+		label: "Tokens per minute",
+		description:
+			"Most tokens (input plus output) to send per minute to one provider, over a rolling 60-second window. Each request's input is estimated before sending and corrected with the usage the server reports. Accepts k and m, e.g. 500k. 0 for no limit.",
+		env: "PI_XML_TOOLS_TOKEN_RATE",
+		flag: "xml-tools-token-rate",
+	},
+	{
 		key: "debugLog",
 		label: "Debug log file",
 		description:
@@ -130,9 +152,24 @@ export function parseOptionText(key: SettingKey, text: string): ParsedValue {
 			if (ON.test(t)) return { ok: true, value: true };
 			if (OFF.test(t)) return { ok: true, value: false };
 			return bad();
+		case "requestRate":
+		case "tokenRate": {
+			const n = parseCount(t);
+			return n === undefined
+				? { ok: false, error: `${optionInfo(key).label}: "${text}" is not valid. Use a whole number, or 0 for no limit.` }
+				: { ok: true, value: n };
+		}
 		case "debugLog":
 			return { ok: true, value: t === "" ? undefined : expandHome(t) };
 	}
+}
+
+/** A non-negative whole number, optionally with a k or m suffix ("500k"). */
+function parseCount(text: string): number | undefined {
+	const m = /^(\d+(?:\.\d+)?)\s*([km]?)$/i.exec(text.replace(/[_,]/g, ""));
+	if (!m) return undefined;
+	const n = Number(m[1]) * (m[2].toLowerCase() === "k" ? 1_000 : m[2].toLowerCase() === "m" ? 1_000_000 : 1);
+	return Number.isInteger(n) ? n : undefined;
 }
 
 /** The text form of a value; the inverse of parseOptionText. Empty means "none". */
@@ -180,6 +217,14 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv = process.env): SettingsL
 	if (decode !== undefined) out.decodeEntities = /^auto$/i.test(decode) ? "auto" : ON.test(decode);
 	const where = get("PI_XML_TOOLS_INSTRUCTIONS_IN");
 	if (where !== undefined) out.instructionsIn = /^system$/i.test(where) ? "system" : "user";
+	for (const [name, key] of [
+		["PI_XML_TOOLS_REQUEST_RATE", "requestRate"],
+		["PI_XML_TOOLS_TOKEN_RATE", "tokenRate"],
+	] as const) {
+		const raw = get(name);
+		const n = raw === undefined ? undefined : parseCount(raw);
+		if (n !== undefined) out[key] = n;
+	}
 	const debug = get("PI_XML_TOOLS_DEBUG");
 	if (debug !== undefined) out.debugLog = expandHome(debug);
 	return out;
@@ -232,6 +277,11 @@ export function parseConfig(raw: unknown): ParsedConfig {
 			case "stopSequences":
 				if (typeof value === "boolean") out.stopSequences = value;
 				else warn("must be true or false.");
+				break;
+			case "requestRate":
+			case "tokenRate":
+				if (typeof value === "number" && Number.isInteger(value) && value >= 0) out[key] = value;
+				else warn("must be a whole number of 0 or more (0 for no limit).");
 				break;
 			case "debugLog":
 				if (value === null || value === "") out.debugLog = undefined;
