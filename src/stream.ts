@@ -29,7 +29,7 @@ import { findNameInBody, parseArguments } from "./args.ts";
 import { DEFAULT_SETTINGS, type XmlToolsSettings } from "./config.ts";
 import { HALT_MARKERS, type SplitEvent, ToolCallSplitter } from "./parser.ts";
 import { prependToFirstUser, renderToolInstructions, rewriteMessages } from "./prompt.ts";
-import { abortableSleep, isRateLimitError, RateLimiter } from "./rate-limit.ts";
+import { abortableSleep, formatTally, isRateLimitError, RateLimiter } from "./rate-limit.ts";
 
 /** How many times a rate-limited (429) request is retried here before the error goes to Pi's own retry. */
 export const MAX_RATE_LIMIT_RETRIES = 5;
@@ -84,8 +84,37 @@ export function createXmlToolsStream(
 		if (!limiter) limiters.set(provider, (limiter = new RateLimiter()));
 		return limiter;
 	};
-	const showWait = (ms: number, why: string) =>
-		hooks.onStatus?.(ms > 0 ? `xml-tools: ${why}, sending in ${Math.ceil(ms / 1000)}s (Esc cancels)` : undefined);
+
+	// Footer status: a countdown while a request is held back, otherwise the tally for the last
+	// minute of the most recently used provider. A one-second timer lets old requests visibly
+	// drop out of the window; it stops (and the status clears) once the window is empty.
+	let waitingText: string | undefined;
+	let statusProvider: string | undefined;
+	let statusTimer: ReturnType<typeof setInterval> | undefined;
+	const refreshStatus = () => {
+		if (waitingText) return hooks.onStatus?.(waitingText);
+		const usage = statusProvider ? limiters.get(statusProvider)?.usage() : undefined;
+		if (!usage || usage.requests === 0) {
+			if (statusTimer) clearInterval(statusTimer);
+			statusTimer = undefined;
+			return hooks.onStatus?.(undefined);
+		}
+		const { requestRate, tokenRate } = currentSettings();
+		hooks.onStatus?.(formatTally(usage, { requestRate, tokenRate }));
+	};
+	const trackProvider = (provider: string) => {
+		statusProvider = provider;
+		if (!statusTimer) {
+			statusTimer = setInterval(refreshStatus, 1_000);
+			// Never keep Pi running just to update the footer.
+			statusTimer.unref?.();
+		}
+		refreshStatus();
+	};
+	const showWait = (ms: number, why: string) => {
+		waitingText = ms > 0 ? `xml-tools: ${why}, sending in ${Math.ceil(ms / 1000)}s (Esc cancels)` : undefined;
+		refreshStatus();
+	};
 
 	return function streamXmlTools(
 		model: Model<Api>,
@@ -154,7 +183,8 @@ export function createXmlToolsStream(
 			};
 			const end = () => {
 				outerSignal?.removeEventListener("abort", onOuterAbort);
-				hooks.onStatus?.(undefined);
+				waitingText = undefined;
+				refreshStatus();
 				writeDebug();
 				stream.end();
 			};
@@ -297,6 +327,7 @@ export function createXmlToolsStream(
 						showWait(ms, "rate limit"),
 					);
 					rateLimitWaitMs += waitedMs;
+					trackProvider(model.provider);
 					const inner = openAICompletionsApi().streamSimple(innerModel, requestContext, innerOptions);
 					let lastUsage = output.usage;
 					let retry = false;
@@ -318,6 +349,7 @@ export function createXmlToolsStream(
 									closeOpenBlocks();
 									output.usage = { ...lastUsage };
 									settleUsage(reservation, output.usage);
+									refreshStatus();
 									output.responseId = event.partial.responseId;
 									output.responseModel = event.partial.responseModel;
 									output.stopReason = output.content.some((b) => b.type === "toolCall") ? "toolUse" : "stop";
@@ -354,6 +386,7 @@ export function createXmlToolsStream(
 								const msg = event.message;
 								output.usage = msg.usage;
 								settleUsage(reservation, msg.usage);
+								refreshStatus();
 								output.responseId = msg.responseId;
 								output.responseModel = msg.responseModel;
 								output.rawStopReason = msg.rawStopReason;

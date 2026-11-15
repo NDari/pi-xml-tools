@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseOptionText, parseConfig, settingsFromEnv, DEFAULT_SETTINGS } from "../src/config.ts";
-import { isRateLimitError, RateLimiter, WINDOW_MS } from "../src/rate-limit.ts";
+import { formatTally, isRateLimitError, RateLimiter, WINDOW_MS } from "../src/rate-limit.ts";
 
 /** A limiter on a fake clock: sleep() just moves time forward. */
 function fake() {
@@ -134,4 +134,21 @@ test("requestRate and tokenRate options", () => {
 	});
 	assert.deepEqual(parseConfig({ requestRate: 60, tokenRate: 0 }).settings, { requestRate: 60, tokenRate: 0 });
 	assert.deepEqual(parseConfig({ tokenRate: "500k" }).warnings, ["xmlTools.tokenRate must be a whole number of 0 or more (0 for no limit)."]);
+});
+
+test("usage and the footer tally", async () => {
+	const { limiter, advance } = fake();
+	const limits = { requestRate: 120, tokenRate: 500_000 };
+	assert.deepEqual(limiter.usage(), { requests: 0, tokens: 0 });
+	const { reservation } = await limiter.acquire(4_000, limits);
+	reservation.settle({ totalTokens: 182_000, promptTokens: 1_000 });
+	await limiter.acquire(400, limits);
+	const usage = limiter.usage();
+	assert.equal(usage.requests, 2);
+	assert.equal(formatTally(usage, limits), "xml-tools: 2/120 req · 182k/500k tok (60s)");
+	assert.equal(formatTally({ requests: 3, tokens: 1_250 }, { requestRate: 0, tokenRate: 1_500_000 }), "xml-tools: 3 req · 1.3k/1.5m tok (60s)");
+	assert.equal(formatTally({ requests: 1, tokens: 950 }, { requestRate: 0, tokenRate: 0 }), "xml-tools: 1 req · 950 tok (60s)");
+	// Requests leave the tally as they leave the window.
+	advance(WINDOW_MS);
+	assert.deepEqual(limiter.usage(), { requests: 0, tokens: 0 });
 });

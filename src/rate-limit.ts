@@ -133,10 +133,31 @@ export class RateLimiter {
 		return Math.max(1_000, Math.min(untilOldestExpires, WINDOW_MS));
 	}
 
+	/** What this process sent in the last 60 seconds. Tokens are real totals once a response reports them, estimates before. */
+	usage(): { requests: number; tokens: number } {
+		this.prune();
+		return { requests: this.entries.length, tokens: this.entries.reduce((sum, e) => sum + e.tokens, 0) };
+	}
+
 	private prune(): void {
 		const cutoff = this.now() - WINDOW_MS;
 		while (this.entries.length && this.entries[0].time <= cutoff) this.entries.shift();
 	}
+}
+
+/** The footer text, e.g. "xml-tools: 14/120 req · 182k/500k tok (60s)". A limit of 0 shows the count alone. */
+export function formatTally(usage: { requests: number; tokens: number }, limits: RateLimits): string {
+	const part = (n: number, limit: number, unit: string, fmt: (x: number) => string) =>
+		limit > 0 ? `${fmt(n)}/${fmt(limit)} ${unit}` : `${fmt(n)} ${unit}`;
+	return `xml-tools: ${part(usage.requests, limits.requestRate, "req", String)} · ${part(usage.tokens, limits.tokenRate, "tok", compact)} (60s)`;
+}
+
+/** 950, 1.2k, 182k, 1.5m */
+function compact(n: number): string {
+	const short = (x: number, unit: string) => `${x < 10 ? Number(x.toFixed(1)) : Math.round(x)}${unit}`;
+	if (n < 1_000) return String(n);
+	if (n < 1_000_000) return short(n / 1_000, "k");
+	return short(n / 1_000_000, "m");
 }
 
 /** Whether an error message is a temporary rate limit (not an exhausted quota, which retrying won't fix). */

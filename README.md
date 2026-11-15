@@ -112,6 +112,8 @@ Many gateways limit requests and tokens per minute and answer `429` when a reque
 - **Before sending**, it estimates the request's input tokens and, if the request wouldn't fit in the window, waits until enough older requests have left it. The status bar shows the countdown, and Esc cancels. The estimate starts at 4 characters per token and is corrected with the usage the server reports for each response. Each request then counts with its real total (input plus output).
 - **If the server still answers 429** (for example because another Pi session uses the same key), the request is retried here, up to 5 times, before Pi sees an error. It waits until the oldest of this session's requests leaves the window, or, if there are none, 5, 10, 20, 40 and then 60 seconds. Errors that mean the quota is used up (`insufficient_quota`, billing) are not retried.
 
+The footer shows the tally for the last minute, for example `xml-tools: 14/120 req · 182k/500k tok (60s)`, for the provider of the most recent request. It updates every second as old requests leave the window and disappears when the window is empty. While a request is held back, the countdown takes its place.
+
 The record is per Pi process, so several sessions sharing one key each see only their own requests and rely on the 429 retry. The debug log records each request's wait and retry count under `rateLimit`.
 
 ## How it works

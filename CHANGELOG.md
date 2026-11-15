@@ -1,3 +1,7 @@
+## [Unreleased]
+
+- Added: a footer status with the last minute's tally, e.g. `xml-tools: 14/120 req · 182k/500k tok (60s)`. It updates every second and disappears when nothing was sent in the last minute.
+
 ## [0.3.0]
 
 - Added: client-side rate limiting with `requestRate` (default 120 per minute) and `tokenRate` (default 500,000 per minute) over a rolling 60-second window per provider. Requests wait until they fit, with a countdown in the status bar, and a `429` is retried up to 5 times before Pi sees it. Set either to `0` for no limit.
