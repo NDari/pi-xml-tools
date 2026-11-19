@@ -3,13 +3,13 @@ import { test } from "node:test";
 import { type SplitEvent, ToolCallSplitter } from "../src/parser.ts";
 
 /** Feed text in random-sized chunks and return normalized events. */
-function run(text: string, seed: number): { text: string; calls: { name: string; body: string; complete: boolean }[]; halted: boolean; order: string[] } {
+function run(text: string, seed: number, drop: string[] = []): { text: string; calls: { name: string; body: string; complete: boolean }[]; halted: boolean; order: string[] } {
 	let s = seed;
 	const rand = () => {
 		s = (s * 1103515245 + 12345) & 0x7fffffff;
 		return s / 0x7fffffff;
 	};
-	const sp = new ToolCallSplitter();
+	const sp = new ToolCallSplitter({ drop });
 	const events: SplitEvent[] = [];
 	let i = 0;
 	while (i < text.length) {
@@ -178,4 +178,16 @@ test("ordinary code fences pass through as text", () => {
 		assert.equal(r.text, t);
 		assert.equal(r.calls.length, 0);
 	}
+});
+
+test("a copied </instructions> tag is dropped when asked", () => {
+	const t = `Checking.\n<tool_call name="bash">\n<parameter name="command">ls</parameter>\n</tool_call>\n</instructions>`;
+	for (const seed of SEEDS) {
+		const r = run(t, seed, ["</instructions>"]);
+		assert.equal(r.calls.length, 1);
+		assert.equal(r.text.trim(), "Checking.");
+		assert.ok(!r.text.includes("instructions"));
+	}
+	// Without the option, the text is kept as written.
+	assert.ok(run(t, 1).text.includes("</instructions>"));
 });

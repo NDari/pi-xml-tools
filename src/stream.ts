@@ -302,7 +302,11 @@ export function createXmlToolsStream(
 			try {
 				const { context: requestContext, tools: currentTools } = buildRequestContext(model, context, settings.instructionsIn);
 				tools.push(...currentTools);
-				const splitter = new ToolCallSplitter();
+				// With the prompt in the first user message, models copy the wrapper's
+				// closing tag onto their replies (Gemma 3 does on most turns).
+				const splitter = new ToolCallSplitter({
+					drop: settings.instructionsIn === "user" ? ["</instructions>"] : [],
+				});
 
 				const innerModel = { ...model, api: "openai-completions" } as Model<"openai-completions">;
 				const innerOptions: SimpleStreamOptions = {

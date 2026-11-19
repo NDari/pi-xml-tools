@@ -44,6 +44,16 @@ const NAME_ATTR = /^<tool_call(?:\s+[^>]*?\b(?:name|tool|function)\s*=\s*["']?([
 const FENCE_NAME_ATTR = /\b(?:name|tool|function)\s*=\s*["']?([\w.:-]+)/;
 
 export class ToolCallSplitter {
+	/**
+	 * Text removed wherever it appears outside a call, e.g. the closing
+	 * </instructions> tag that models copy from the prompt wrapper.
+	 */
+	private readonly drop: string[];
+
+	constructor(opts: { drop?: string[] } = {}) {
+		this.drop = opts.drop ?? [];
+	}
+
 	private buffer = "";
 	private inTool = false;
 	private headerDone = false;
@@ -107,6 +117,12 @@ export class ToolCallSplitter {
 				const fenced = fenceOpen !== -1 && (tagOpen === -1 || fenceOpen < tagOpen);
 				const open = fenced ? fenceOpen : tagOpen;
 				const halt = findFirst(this.buffer, HALT_MARKERS).index;
+				const drop = findFirst(this.buffer, this.drop);
+				if (drop.index !== -1 && (open === -1 || drop.index < open) && (halt === -1 || drop.index < halt)) {
+					if (drop.index > 0) events.push({ type: "text", text: this.buffer.slice(0, drop.index) });
+					this.buffer = this.buffer.slice(drop.index + drop.marker.length);
+					continue;
+				}
 				if (halt !== -1 && (open === -1 || halt < open)) {
 					if (halt > 0) events.push({ type: "text", text: this.buffer.slice(0, halt) });
 					this.buffer = "";
@@ -116,7 +132,7 @@ export class ToolCallSplitter {
 				}
 				if (open === -1) {
 					// Hold back anything that might be the start of a marker.
-					const keep = final ? 0 : partialMarkerSuffix(this.buffer, [OPEN, FENCE_OPEN, ...HALT_MARKERS]);
+					const keep = final ? 0 : partialMarkerSuffix(this.buffer, [OPEN, FENCE_OPEN, ...HALT_MARKERS, ...this.drop]);
 					const emit = this.buffer.slice(0, this.buffer.length - keep);
 					if (emit) events.push({ type: "text", text: emit });
 					this.buffer = this.buffer.slice(this.buffer.length - keep);
